@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# 构建产物与预测指纹：每个用户自己生成，不进仓库
+看板.html
+.tracker-lock.json
+*.tmp

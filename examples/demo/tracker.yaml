@@ -1,0 +1,6 @@
+title: 示例研究组看板
+lines: [主线课题, 学习与调研]
+stale_days: 90
+min_runs: {实机: 3}
+result_words: [成功, 失败, 部分, 无效, 完成]
+today: 2026-03-20
