@@ -122,7 +122,7 @@ def t_audit():
     lock = T.load_all(r)['fingerprints']
     open(os.path.join(r, 'experiments/E1.md'), 'w', encoding='utf-8').write(E % ('离线', '计划中', 'predicted_at: "2026-05-01 09:00"\n', PRED % ('会升', '升了就错')))
     check('检查能触发: prediction-changed', any(a['code'] == 'prediction-changed' for a in T.load_all(r, lock=lock)['audit']))
-    check('覆盖了全部检查代码', len(cases) + 1 == len(T.CODES), '%d 种用例 对 %d 个代码' % (len(cases) + 1, len(T.CODES)))
+    check('覆盖了全部检查代码', len(cases) + 1 + 3 == len(T.CODES), '%d 种用例 对 %d 个代码（树检查 3 个在 t_tree 里）' % (len(cases) + 1 + 3, len(T.CODES)))
     d = T.load_all(mk({'projects/p.md': P % ('2026-01-01', '')}, 'lines: [L]\nstale_days: 30\ntoday: 2026-06-01\nchecks_off: [stale-project]\n'))
     check('checks_off 能关闭检查', not any(a['code'] == 'stale-project' for a in d['audit']))
     d = T.load_all(mk({'projects/p.md': P % ('2026-05-30', ''), 'experiments/E1.md': E % ('离线', '已完成', 'backfilled: 2026-05-20\n', '## 结果\n- r\n')}))
@@ -200,6 +200,62 @@ def t_templates():
     check('全部文件无乱码', all('\ufffd' not in open(f, encoding='utf-8').read() for f in glob.glob(os.path.join(SKILL, '**', '*'), recursive=True) if os.path.isfile(f) and f.endswith(('.md', '.py', '.js', '.css', '.yaml'))))
 
 
+# ---------------------------------------------------------------- 6 问题树
+TP = '---\nid: %s\nname: "%s"\nline: L\n%sstatus: 进行中\nstatus_basis: b\nupdated: 2026-05-30\nquestion: q\nstages:\n  - {n: a, s: doing}\n%s---\n'
+
+
+def t_tree():
+    files = {
+        'projects/root.md': TP % ('root', '核心', 'kind: 核心问题\n', 'ideas:\n  - {t: "想法A", status: 待评估, date: 2026-01-01}\n  - {t: "想法B", status: 已开课题, to: a}\n  - {t: "想法C", status: 放弃}\n'),
+        'projects/a.md': TP % ('a', '子A', 'kind: 子课题\nparent: root\norigin: "讨论中分出"\n', ''),
+        'projects/b.md': TP % ('b', '子B', 'parent: root\n', ''),
+        'projects/c.md': TP % ('c', '孙C', 'kind: 想法分支\nparent: a\norigin: o\n', ''),
+        'projects/orph.md': TP % ('orph', '孤儿', 'kind: 子课题\n', ''),
+        'projects/legacy.md': TP % ('legacy', '旧格式', '', ''),
+    }
+    d = T.load_all(mk(files))
+    by = {p['id']: p for p in d['projects']}
+    check('树: 子课题挂在 parent 下', by['root']['children'] == ['a', 'b'] or sorted(by['root']['children']) == ['a', 'b'], by['root']['children'])
+    check('树: 深度与根', by['c']['depth'] == 2 and by['c']['root'] == 'root' and by['root']['depth'] == 0)
+    check('树: 子孙数', by['root']['descendants'] == 3, by['root']['descendants'])
+    check('树: 有 parent 没写 kind 时默认是子课题', by['b']['kind'] == '子课题')
+    check('树: 旧格式（无 kind/parent）默认是核心问题', by['legacy']['kind'] == '核心问题' and 'legacy' in d['tree']['roots'])
+    check('树: 统计想法数', d['tree']['n_ideas'] == 3 and d['tree']['n_ideas_open'] == 1, d['tree'])
+    codes = {(a['code'], a['id']) for a in d['audit']}
+    check('树检查: 子课题没有 parent → orphan-subtopic', ('orphan-subtopic', 'orph') in codes)
+    check('树检查: 有 parent 没写 origin → no-origin', ('no-origin', 'b') in codes and ('no-origin', 'a') not in codes)
+    check('树检查: 想法待评估太久 → stale-idea', ('stale-idea', 'root') in codes)
+    for name, extra, key in (
+        ('parent 指向不存在的课题', {'projects/x.md': TP % ('x', 'X', 'parent: ghost\n', '')}, 'ghost'),
+        ('parent 指向自己', {'projects/x.md': TP % ('x', 'X', 'parent: x\n', '')}, '自己'),
+        ('parent 成环', {'projects/x.md': TP % ('x', 'X', 'parent: y\n', ''), 'projects/y.md': TP % ('y', 'Y', 'parent: x\n', '')}, '环'),
+        ('核心问题不能有 parent', {'projects/r.md': TP % ('r', 'R', 'kind: 核心问题\n', ''), 'projects/x.md': TP % ('x', 'X', 'kind: 核心问题\nparent: r\n', '')}, '核心问题'),
+        ('kind 不在允许范围', {'projects/x.md': TP % ('x', 'X', 'kind: 大问题\n', '')}, '大问题'),
+        ('想法状态不在允许范围', {'projects/x.md': TP % ('x', 'X', '', 'ideas:\n  - {t: t, status: 想想}\n')}, '想想'),
+        ('已开课题的想法必须写 to', {'projects/x.md': TP % ('x', 'X', '', 'ideas:\n  - {t: t, status: 已开课题}\n')}, 'to'),
+        ('想法的 to 指向不存在的课题', {'projects/x.md': TP % ('x', 'X', '', 'ideas:\n  - {t: t, status: 已开课题, to: nope}\n')}, 'nope'),
+    ):
+        try:
+            T.load_all(mk(extra)); check('树错误: ' + name, False)
+        except T.TrackerError as e:
+            check('树错误: ' + name, any(key in m for m in e.errors), e.errors[:2])
+    # 环不能让程序卡死，且只报一次
+    r = mk({'projects/x.md': TP % ('x', 'X', 'parent: y\n', ''), 'projects/y.md': TP % ('y', 'Y', 'parent: z\n', ''), 'projects/z.md': TP % ('z', 'Z', 'parent: x\n', '')})
+    try:
+        T.load_all(r)
+    except T.TrackerError as e:
+        check('树错误: 三节点环只报一次', sum('环' in m for m in e.errors) == 1, e.errors)
+    # 大树: 40 个节点 6 层，构建要快
+    import random, time
+    random.seed(7); fs = {'projects/n0.md': TP % ('n0', 'n0', 'kind: 核心问题\n', '')}; ns = [('n0', 0)]
+    for i in range(1, 300):
+        par = random.choice([x for x in ns if x[1] < 8]); ns.append(('n%d' % i, par[1] + 1))
+        fs['projects/n%d.md' % i] = TP % ('n%d' % i, 'n%d' % i, 'parent: %s\norigin: o\n' % par[0], '')
+    t0 = time.time(); d = T.load_all(mk(fs))
+    check('树: 300 个节点 9 层能在 3 秒内读完', time.time() - t0 < 3 and len(d['projects']) == 300, '%.2f 秒' % (time.time() - t0))
+    check('树: 300 节点全部挂到同一个根', d['tree']['roots'] == ['n0'] and d['projects'][0]['root'] == 'n0')
+
+
 def chrome():
     for p in ('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'):
         if os.path.exists(p):
@@ -227,15 +283,15 @@ def t_browser():
     r = tmp(); q = os.path.join(r, 'demo'); run(os.path.join(SKILL, 'scripts', 'init.py'), q, '--demo'); run(os.path.join(SKILL, 'scripts', 'build.py'), q, '--today', '2026-03-20')
     src = open(os.path.join(q, '看板.html'), encoding='utf-8').read()
     js = r"""<script>window.addEventListener('load',function(){var out=[];function ok(n,c,x){out.push((c?'PASS ':'FAIL ')+n+(x?' | '+x:''))}
-try{go('home',true);ok('首页有 2 张课题卡',document.querySelectorAll('.card').length===2);document.querySelector('.card').click();ok('点课题卡进入详情',!!document.querySelector('.crumb'));
+try{ok('默认打开问题树',document.querySelector('main h1').textContent==='问题树');go('home',true);ok('课题页有 5 张课题卡',document.querySelectorAll('.card').length===5,document.querySelectorAll('.card').length);document.querySelector('.card').click();ok('点课题卡进入详情',!!document.querySelector('.crumb'));
 go('exps');var r0=document.querySelectorAll('table.ev tbody tr').length;ok('实验表 6 行',r0===6,r0);document.querySelectorAll('table.ev tbody .linkbtn')[0].click();ok('展开详情',!!document.querySelector('.detail'));
 var sf=document.getElementById('f-warn');sf.value='warn';sf.dispatchEvent(new Event('change'));var rw=document.querySelectorAll('table.ev tbody tr:not(:has(.detail))').length;ok('筛选有警告',rw<r0&&rw>0,r0+'->'+rw);sf.value='';sf.dispatchEvent(new Event('change'));
 var q=document.getElementById('f-q');q.value='泊松';q.dispatchEvent(new Event('input'));ok('搜索',document.querySelectorAll('table.ev tbody .linkbtn').length===1);q.value='';q.dispatchEvent(new Event('input'));
 var c=document.querySelectorAll('table.ev .chk');c[0].checked=true;c[0].dispatchEvent(new Event('change'));c[1].checked=true;c[1].dispatchEvent(new Event('change'));var b=document.getElementById('cmpBtn');ok('对比按钮可用',!b.disabled);b.click();ok('对比表有高亮行',document.querySelectorAll('.cmp tr.diff').length>0);
 go('hyps');ok('假设页 4 条',document.querySelectorAll('.panel.hyp').length===4);ok('H2 缺反面提示',document.getElementById('hyp-H2').textContent.indexOf('没写')>=0);ok('H3 无实验提示',document.getElementById('hyp-H3').textContent.indexOf('没有实验指向它')>=0);
 go('errors');ok('错误页',document.body.textContent.indexOf('ERR1')>=0);go('audit');ok('纪律页',document.body.textContent.indexOf('预测晚于开跑')>=0);go('how');ok('说明页',document.querySelector('h1').textContent==='怎么更新这个页面');
-go('p:survey');ok('课题详情',document.querySelector('h1').textContent.indexOf('文献调研')>=0);go('p:不存在');ok('未知路由回首页',!!document.querySelector('.cards'));
-['home','hyps','exps','errors','audit','how','p:denoise','p:survey'].forEach(function(r){go(r,true);var d=document.documentElement;ok('无横向溢出 '+r,d.scrollWidth-d.clientWidth<=1,d.clientWidth+'/'+d.scrollWidth)})
+go('p:survey');ok('课题详情',document.querySelector('h1').textContent.indexOf('文献调研')>=0);go('p:不存在');ok('未知路由回问题树',!!document.querySelector('svg.mind'));go('tree',true);var nn=document.querySelectorAll('svg.mind .node').length,ii=document.querySelectorAll('svg.mind .idea').length;ok('树: 5 个课题节点 4 个想法',nn===5&&ii===4,nn+'/'+ii);var rs=[].map.call(document.querySelectorAll('svg.mind .node .box, svg.mind .idea rect'),function(r){return r.getBoundingClientRect()});var ov=0;for(var i=0;i<rs.length;i++)for(var j=i+1;j<rs.length;j++){var A=rs[i],B=rs[j];if(A.left<B.right-1&&B.left<A.right-1&&A.top<B.bottom-1&&B.top<A.bottom-1)ov++}ok('树: 节点互不重叠',ov===0,ov);var tb=0;[].forEach.call(document.querySelectorAll('svg.mind .node, svg.mind .idea'),function(g){var bx=(g.querySelector('.box')||g.querySelector('rect')).getBoundingClientRect();[].forEach.call(g.querySelectorAll('text'),function(t){if(t.closest('.wbadge')||t.closest('.toggle'))return;var r=t.getBoundingClientRect();if(r.right>bx.right+1||r.bottom>bx.bottom+1)tb++})});ok('树: 文字不超出框',tb===0,tb);document.querySelector('svg.mind .toggle').dispatchEvent(new MouseEvent('click',{bubbles:true}));ok('树: 收起根后只剩 1 个节点',document.querySelectorAll('svg.mind .node').length===1);document.querySelector('svg.mind .toggle').dispatchEvent(new MouseEvent('click',{bubbles:true}));var cb=document.querySelector('.chkl input');cb.checked=false;cb.dispatchEvent(new Event('change'));ok('树: 可隐藏想法',document.querySelectorAll('svg.mind .idea').length===0);cb=document.querySelector('.chkl input');cb.checked=true;cb.dispatchEvent(new Event('change'));[].filter.call(document.querySelectorAll('svg.mind .node'),function(g){return g.getAttribute('data-go')==='p:low-noise-harm'})[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));var cr=document.querySelector('.crumb').textContent;ok('树: 点节点进详情且面包屑是完整路径',cr.indexOf('去噪先验')>=0&&cr.indexOf('噪声强度')>=0,cr);go('tree',true);var dd=document.querySelector('details');dd.open=true;ok('树: 文字版列出 5 个课题',dd.querySelectorAll('.tl-row').length===5);
+['tree','home','hyps','exps','errors','audit','how','p:denoise','p:survey'].forEach(function(r){go(r,true);var d=document.documentElement;ok('无横向溢出 '+r,d.scrollWidth-d.clientWidth<=1,d.clientWidth+'/'+d.scrollWidth)})
 }catch(e){out.push('FAIL 异常 '+e.message)}var pre=document.createElement('pre');pre.id='TESTOUT';pre.textContent=out.join('\n');document.body.appendChild(pre)})</script>"""
     f = os.path.join(r, 't.html'); open(f, 'w', encoding='utf-8').write(src.replace('</body>', js + '</body>'))
     out, err = headless(f)
@@ -274,7 +330,7 @@ var pre=document.createElement('pre');pre.id='TESTOUT';pre.textContent=out.join(
 
 
 def main():
-    for fn in (t_yaml, t_md, t_audit, t_errors, t_cli, t_templates, t_browser):
+    for fn in (t_yaml, t_md, t_audit, t_errors, t_cli, t_templates, t_tree, t_browser):
         print('\n== ' + fn.__name__)
         try:
             fn()

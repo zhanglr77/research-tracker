@@ -32,6 +32,10 @@
 | `blockers` `next` `retracted` `sources` `related` | 否 | 文字列表；`related` 里是其他课题的 id |
 | `links` | 否 | 列表，每项 `{label, path}`；本地路径相对于研究目录，或写 `https://` 网址 |
 | `deadline` | 否 | `{date: 2026-12-01, what: 说明}` |
+| `kind` | 否 | 核心问题、子课题、想法分支。默认：有 `parent` 时是子课题，否则是核心问题 |
+| `parent` | 否 | 父课题的 id，表示这个课题是从它分出来的。核心问题不能有 `parent`；不能指向自己，不能成环 |
+| `origin` | 建议 | 在哪次讨论、因为什么分出来的。有 `parent` 却没写会被提示 |
+| `ideas` | 否 | 讨论中冒出的想法，每项 `{t: 内容, status: 待评估/已开课题/暂不做/放弃, why: 理由, date: 日期, to: 开成的课题 id}`。`已开课题` 必须写 `to` |
 
 证据等级：有数据、仿真、推断、未验证、决定、记录、想法。
 
@@ -94,8 +98,11 @@ frontmatter：
 | backfilled | 提示 | 回填记录 |
 | config-tbd | 提示 | 配置指纹有待补项 |
 | skipped-note | 提示 | 没有 frontmatter 的文件被跳过 |
+| orphan-subtopic | 警告 | kind 是子课题或想法分支，但没有 `parent` |
+| no-origin | 提示 | 有 `parent` 但没写 `origin` |
+| stale-idea | 提示 | 想法“待评估”超过 `stale_days` 天 |
 
-结果词不在 `result_words` 里、字段缺失、日期格式错、引用了不存在的 id，这些是**构建错误**，必须改了才能生成。
+结果词不在 `result_words` 里、字段缺失、日期格式错、引用了不存在的 id、`parent` 指向自己或成环，这些是**构建错误**，必须改了才能生成。
 
 ## 支持的 YAML 写法
 

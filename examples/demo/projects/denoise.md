@@ -3,6 +3,7 @@ id: denoise
 name: "小样本下的图像去噪：先验够不够用"
 short: "去噪先验"
 line: 主线课题
+kind: 核心问题
 status: 进行中
 status_basis: "最后一条实验记录在 2026-03-18，E3 刚完成；E4 计划中。"
 updated: 2026-03-18
@@ -29,6 +30,12 @@ sources: ["experiments/ 下 E1–E4", "hypotheses/ 下 H1–H2"]
 links:
   - {label: "课题备忘", path: "notes/denoise-memo.md"}
 related: [survey]
+ideas:
+  - {t: "先验的收益是不是只在高噪声时才有", status: 已开课题, to: noise-level, why: "E3 分组结果里低噪声没有收益", date: 2026-03-16}
+  - {t: "基线网络会不会太弱，让先验显得有用", status: 已开课题, to: baseline-strength, why: "E3 的审查里提出的担心", date: 2026-03-16}
+  - {t: "换成学出来的先验（小型扩散模型）", status: 待评估, why: "和手写先验对照，看收益来自先验本身还是来自正则化", date: 2026-03-18}
+  - {t: "用真实相机图像做主实验", status: 暂不做, why: "数据授权没下来，先在合成数据上把机制弄清楚", date: 2026-03-10}
+  - {t: "直接换成 Transformer 去噪", status: 放弃, why: "和要回答的问题无关：问题是先验，不是架构", date: 2026-03-08}
 ---
 
 # 小样本下的图像去噪

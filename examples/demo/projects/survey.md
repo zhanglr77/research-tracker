@@ -3,6 +3,9 @@ id: survey
 name: "文献调研：自监督去噪方法"
 short: "文献调研"
 line: 学习与调研
+kind: 子课题
+parent: denoise
+origin: "2025-09 开题讨论时，agent 建议先看自监督去噪有没有小样本的实验证据，再决定要不要自己做。"
 status: 无近期记录
 status_basis: "笔记里最后一条是 2025-09-02，之后没有记录。这不等于没有进展。"
 updated: 2025-09-02

@@ -14,6 +14,8 @@ STAGE = ['done', 'doing', 'blocked', 'todo', 'unk']
 EVIDENCE = ['有数据', '仿真', '推断', '未验证', '决定', '记录', '想法']
 HYP_STATUS = ['待检验', '支持', '部分', '反对', '推翻']
 EXP_STATUS = ['计划中', '进行中', '已完成', '作废']
+PROJECT_KIND = ['核心问题', '子课题', '想法分支']
+IDEA_STATUS = ['待评估', '已开课题', '暂不做', '放弃']
 DEFAULT_RESULT_WORDS = ['成功', '失败', '部分', '无效', '完成']
 OK_WORDS = ('成功', '完成')
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
@@ -37,6 +39,9 @@ CODES = {
     'backfilled': ('回填记录', 'info', '事后补记的旧记录，没有事前预测是正常的；当作线索，不当结论。'),
     'config-tbd': ('配置有待补项', 'info', '配置指纹里有“待补”：当时没记下，不是 0。'),
     'skipped-note': ('已跳过的文件', 'info', '文件没有 frontmatter，没有被读入。'),
+    'orphan-subtopic': ('子课题没有挂到树上', 'warn', 'kind 是子课题或想法分支，但没有 parent：它从哪个问题分出来的没有记录。'),
+    'no-origin': ('分叉来源没写', 'info', '子课题没有 origin：没记下是在哪次讨论、因为什么想法分出来的。'),
+    'stale-idea': ('想法久未评估', 'info', '问题树上的想法状态是待评估，且超过 stale_days 天没有更新。'),
 }
 
 
@@ -250,6 +255,30 @@ def load_projects(root, cfg, errs, skipped):
                 errs.append('%s：links 第 %d 项必须有 label 和 path' % (rel, k))
                 continue
             links.append({'label': l['label'], 'path': l['path'].strip()})
+        kind = m.get('kind') or ('子课题' if m.get('parent') else '核心问题')
+        if kind not in PROJECT_KIND:
+            errs.append('%s：kind「%s」不在允许范围：%s' % (rel, kind, '、'.join(PROJECT_KIND)))
+            kind = None
+        parent = m.get('parent')
+        if parent is not None and not isinstance(parent, str):
+            errs.append('%s：parent 必须是一个课题 id（文字）' % rel)
+            parent = None
+        if kind == '核心问题' and parent:
+            errs.append('%s：kind 是核心问题，就不应有 parent；要挂到别的问题下面，把 kind 改成子课题' % rel)
+        ideas = []
+        for k, it in enumerate(as_list(m.get('ideas')), 1):
+            if not isinstance(it, dict) or not isinstance(it.get('t'), str) or not it['t'].strip():
+                errs.append('%s：ideas 第 %d 项缺少 t（想法内容）' % (rel, k))
+                continue
+            st = it.get('status') or '待评估'
+            if st not in IDEA_STATUS:
+                errs.append('%s：ideas 第 %d 项的状态「%s」不在允许范围：%s' % (rel, k, st, '、'.join(IDEA_STATUS)))
+                continue
+            when = it.get('date')
+            if when is not None and parse_date(str(when)) is None:
+                errs.append('%s：ideas 第 %d 项的 date 格式不对，应为 2026-11-25' % (rel, k))
+                continue
+            ideas.append({'t': it['t'], 'status': st, 'why': str(it.get('why') or ''), 'date': str(when) if when else '', 'to': str(it.get('to') or '')})
         deadline = None
         d = m.get('deadline')
         if d is not None:
@@ -257,19 +286,44 @@ def load_projects(root, cfg, errs, skipped):
                 errs.append('%s：deadline 必须形如 {date: 2026-12-01, what: 提交初稿}' % rel)
             else:
                 deadline = {'date': d['date'], 'what': d['what']}
-        if None in (pid, name, status, basis, upd, q, line):
-            partial.append({'id': pid or str(m.get('id') or ''), 'related': check_str_list(m, 'related', rel, errs), 'file': rel})
+        if None in (pid, name, status, basis, upd, q, line, kind):
+            partial.append({'id': pid or str(m.get('id') or ''), 'related': check_str_list(m, 'related', rel, errs), 'parent': parent, 'file': rel})
             continue
         items.append({'id': pid, 'name': name, 'short': str(m.get('short') or ''), 'line': line, 'status': status, 'basis': basis, 'updated': upd,
                       'question': q, 'stages': stages, 'facts': facts, 'blockers': check_str_list(m, 'blockers', rel, errs),
                       'next': check_str_list(m, 'next', rel, errs), 'retracted': check_str_list(m, 'retracted', rel, errs),
                       'sources': check_str_list(m, 'sources', rel, errs), 'related': check_str_list(m, 'related', rel, errs),
-                      'links': links, 'deadline': deadline, 'file': rel, 'body': MD.render(body)})
+                      'links': links, 'deadline': deadline, 'file': rel, 'body': MD.render(body),
+                      'kind': kind, 'parent': parent or '', 'origin': str(m.get('origin') or ''), 'ideas': ideas})
     ids = [p['id'] for p in items] + [p['id'] for p in partial if p['id']]
     for p in items + partial:
         for r in p['related']:
             if r not in ids:
                 errs.append('%s：related 指向不存在的课题「%s」' % (p['file'], r))
+        if p.get('parent'):
+            if p['parent'] == p['id']:
+                errs.append('%s：parent 不能指向自己' % p['file'])
+            elif p['parent'] not in ids:
+                errs.append('%s：parent 指向不存在的课题「%s」' % (p['file'], p['parent']))
+    for p in items:
+        for it in p['ideas']:
+            if it['to'] and it['to'] not in ids:
+                errs.append('%s：ideas 里的 to 指向不存在的课题「%s」' % (p['file'], it['to']))
+            if it['status'] == '已开课题' and not it['to']:
+                errs.append('%s：想法「%s」状态是已开课题，但没有写 to（开成了哪个课题的 id）' % (p['file'], it['t'][:20]))
+    par = {p['id']: p['parent'] for p in items + partial if p['id'] and p.get('parent')}
+    reported = set()
+    for start in par:
+        seen_c, cur = [], start
+        while cur in par and cur not in seen_c:
+            seen_c.append(cur); cur = par[cur]
+        if cur in seen_c:
+            cyc = seen_c[seen_c.index(cur):]
+            key = frozenset(cyc)
+            if key not in reported:
+                reported.add(key)
+                f = next(x['file'] for x in items + partial if x['id'] == cur)
+                errs.append('%s：parent 形成了环：%s' % (f, ' → '.join(cyc + [cur])))
     return items, [p['id'] for p in partial if p['id']]
 
 
@@ -430,6 +484,16 @@ def audit(root, cfg, projects, hyps, exps, today, skipped, lock):
                 q = os.path.join(root, q)
             if not os.path.exists(q):
                 add('link-missing', p['file'], p['id'], '课题「%s」的链接「%s」指向的文件不存在：%s' % (p['name'], l['label'], l['path']))
+    for p in projects:
+        if p['kind'] in ('子课题', '想法分支') and not p['parent']:
+            add('orphan-subtopic', p['file'], p['id'], '「%s」是%s，但没有 parent，不知道它从哪个问题分出来。' % (p['name'], p['kind']))
+        if p['parent'] and is_empty(p['origin']):
+            add('no-origin', p['file'], p['id'], '「%s」没有 origin：没记下它是在哪次讨论里、因为什么分出来的。' % p['name'])
+        for it in p['ideas']:
+            if it['status'] == '待评估':
+                d0 = parse_date(it['date']) if it['date'] else parse_date(p['updated'])
+                if d0 and (today - d0).days > cfg['stale_days']:
+                    add('stale-idea', p['file'], p['id'], '「%s」下的想法「%s」待评估已 %d 天。' % (p['name'], it['t'][:24], (today - d0).days))
     for s in skipped:
         add('skipped-note', s, None, '%s 没有 frontmatter，已跳过。' % s)
     return out
@@ -469,5 +533,33 @@ def load_all(root, today=None, lock=None):
         p['hyps'] = [h['id'] for h in hyps if h['project'] == p['id']]
         p['exps'] = [e['id'] for e in exps if e['project'] == p['id']]
     exps.sort(key=lambda e: (e['date'], e['id']), reverse=True)
+    tree = build_tree(projects)
     return {'root': root, 'cfg': cfg, 'today': today, 'projects': projects, 'hyps': hyps, 'exps': exps, 'errors': errors,
-            'audit': findings, 'fingerprints': prediction_fingerprints(exps)}
+            'audit': findings, 'fingerprints': prediction_fingerprints(exps), 'tree': tree}
+
+
+def build_tree(projects):
+    """问题树：核心问题是根，parent 指向父课题。返回 {roots, children, depth}；没有 parent 的子课题单独作为根（并已在纪律检查里提醒）。
+    同时给每个课题写入 children（子课题 id 列表）、depth（深度，根为 0）、root（所在树的根 id）、descendants（子孙数）。"""
+    ids = {p['id'] for p in projects}
+    by = {p['id']: p for p in projects}
+    kids = {p['id']: [] for p in projects}
+    for p in projects:
+        if p['parent'] in ids:
+            kids[p['parent']].append(p['id'])
+    order = {'核心问题': 0, '子课题': 1, '想法分支': 2}
+    for k in kids:
+        kids[k].sort(key=lambda c: (order.get(by[c]['kind'], 9), by[c]['name']))
+    roots = sorted([p['id'] for p in projects if p['parent'] not in ids], key=lambda r: (order.get(by[r]['kind'], 9), by[r]['name']))
+
+    def walk(nid, d, r):
+        by[nid]['depth'], by[nid]['root'], by[nid]['children'] = d, r, kids[nid]
+        n = 0
+        for c in kids[nid]:
+            n += 1 + walk(c, d + 1, r)
+        by[nid]['descendants'] = n
+        return n
+    for r in roots:
+        walk(r, 0, r)
+    return {'roots': roots, 'max_depth': max([p['depth'] for p in projects] or [0]),
+            'n_ideas': sum(len(p['ideas']) for p in projects), 'n_ideas_open': sum(1 for p in projects for i in p['ideas'] if i['status'] == '待评估')}

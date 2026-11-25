@@ -83,12 +83,19 @@ function linkEl(l) {
 
 function viewProject(id) {
   const p = P[id]; const v = h('div', { class: 'view' });
-  v.appendChild(h('div', { class: 'crumb' }, [h('button', { type: 'button', 'data-go': 'home', text: '← 全部课题' })]));
+  const chain = []; let cur = p; while (cur && cur.parent && P[cur.parent] && chain.length < 20) { cur = P[cur.parent]; chain.unshift(cur); }
+  v.appendChild(h('div', { class: 'crumb' }, [h('button', { type: 'button', 'data-go': 'tree', text: '← 问题树' }), ...chain.flatMap(c => [' / ', h('button', { type: 'button', 'data-go': 'p:' + c.id, text: c.short || c.name })]), ' / ' + (p.short || p.name)]));
   v.appendChild(h('div', { class: 'hero' }, [h('h1', { text: p.name }),
     h('div', { class: 'row' }, [pill('p-' + p.status, p.status), h('span', { class: 'sub', text: '所属：' + p.line + ' · 最后记录 ' + p.updated })]),
     h('p', { class: 'sub', text: '状态依据：' + p.basis })]));
   if (p.deadline) v.appendChild(h('div', { class: 'deadline' }, [h('strong', { text: p.deadline.date + '  ' }), p.deadline.what]));
-  v.appendChild(h('div', { class: 'panel' }, [h('h2', { text: '要回答的问题' }), h('p', { text: p.question })]));
+  v.appendChild(h('div', { class: 'panel' }, [h('h2', { text: '要回答的问题' }), h('p', { text: p.question }),
+    h('p', { class: 'sub', text: '类型：' + p.kind + (p.parent && P[p.parent] ? '，从「' + P[p.parent].name + '」分出' : '') }),
+    p.origin ? h('p', { class: 'sub', text: '怎么分出来的：' + p.origin }) : null]));
+  if (p.children.length || p.ideas.length) v.appendChild(h('div', { class: 'panel' }, [h('h2', { text: '从这里分出去的' }),
+    p.children.length ? h('ul', { class: 'plain' }, p.children.map(c => h('li', null, [h('span', { class: 'kpill ' + (KIND_CLASS[P[c].kind] || ''), text: P[c].kind }), ' ', h('button', { class: 'linkbtn', type: 'button', 'data-go': 'p:' + c, text: P[c].name }), ' ', pill('p-' + P[c].status, P[c].status)]))) : null,
+    p.ideas.length ? h('h3', { style: 'margin-top:12px', text: '讨论中冒出的想法' }) : null,
+    p.ideas.length ? h('ul', { class: 'tl-ideas' }, p.ideas.map(i => h('li', { class: IDEA_CLASS[i.status] || '' }, [h('span', { class: 'istat', text: i.status }), ' ' + i.t, i.why ? h('span', { class: 'sub', text: '（' + i.why + '）' }) : null, i.to && P[i.to] ? h('span', null, [' → ', h('button', { class: 'linkbtn', type: 'button', 'data-go': 'p:' + i.to, text: P[i.to].name })]) : null, i.date ? h('span', { class: 'sub', text: ' · ' + i.date }) : null]))) : null]));
   v.appendChild(h('div', { class: 'panel' }, [h('h2', { text: '阶段' }), bar(p.counts),
     h('ul', { class: 'timeline' }, p.stages.map(s => h('li', null, [h('span', { class: 'mk s-' + s.s, title: STAGE_LABEL[s.s] }),
       h('div', null, [h('b', { text: s.n }), h('span', { class: 'sl', text: STAGE_LABEL[s.s] }), s.note ? h('p', { class: 'note', text: s.note }) : null])])))]));
@@ -114,6 +121,197 @@ function viewProject(id) {
     h('div', { class: 'relset' }, p.related.filter(r => P[r]).map(r => h('button', { class: 'linkbtn', type: 'button', 'data-go': 'p:' + r, text: P[r].name })))]));
   if (p.sources.length) v.appendChild(h('p', { class: 'sub', text: '本页依据：' + p.sources.join('；') }));
   if (p.body) { const d = h('div', { class: 'panel detail' }); d.innerHTML = p.body; v.appendChild(d); }
+  return v;
+}
+
+// ---------- 问题树（思维导图） ----------
+const SVGNS = 'http://www.w3.org/2000/svg';
+function sv(tag, attrs, kids) {
+  const e = document.createElementNS(SVGNS, tag);
+  if (attrs) for (const k in attrs) { const v = attrs[k]; if (v == null || v === false) continue; if (k === 'text') e.textContent = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v); }
+  (kids || []).forEach(c => c && e.appendChild(c)); return e;
+}
+const KIND_CLASS = { '核心问题': 'k-root', '子课题': 'k-sub', '想法分支': 'k-idea' };
+const IDEA_CLASS = { '待评估': 'i-open', '已开课题': 'i-done', '暂不做': 'i-park', '放弃': 'i-drop' };
+const treeState = { showIdeas: true, collapsed: new Set(), focus: null };
+try { const s = JSON.parse(store.get('treeState') || 'null'); if (s) { treeState.showIdeas = s.showIdeas !== false; (s.collapsed || []).forEach(x => P[x] && treeState.collapsed.add(x)); } } catch (e) {}
+function saveTree() { store.set('treeState', JSON.stringify({ showIdeas: treeState.showIdeas, collapsed: [...treeState.collapsed] })); }
+
+// 把文字按显示宽度折行（中日韩字符算 2 个单位，其余 1 个），最多 maxLines 行，超出加省略号。
+// 英文和数字按“词”整体放置，在空格、斜杠、短横线、下划线处断行；只有单个词比整行还长时才在词内硬断。
+function wrapText(s, unitsPerLine, maxLines) {
+  const wide = ch => /[⺀-鿿豈-﫿＀-￯　-〿]/.test(ch);
+  const width = t => [...t].reduce((a, ch) => a + (wide(ch) ? 2 : 1), 0);
+  const tokens = String(s).match(/[A-Za-z0-9._@#%+\-]+[\/\-_]?|\s+|./gu) || [];
+  const lines = []; let cur = '', w = 0, truncated = false;
+  const push = () => { lines.push(cur.replace(/\s+$/, '')); cur = ''; w = 0; };
+  for (const tok of tokens) {
+    if (lines.length >= maxLines) { truncated = true; break; }
+    const tw = width(tok);
+    if (/^\s+$/.test(tok)) { if (w && w + 1 <= unitsPerLine) { cur += ' '; w += 1; } continue; }
+    if (w + tw <= unitsPerLine) { cur += tok; w += tw; continue; }
+    if (tw <= unitsPerLine) { push(); if (lines.length >= maxLines) { truncated = true; break; } cur = tok; w = tw; continue; }
+    for (const ch of tok) {                       // 词比整行还长：在词内硬断
+      const cw = wide(ch) ? 2 : 1;
+      if (w + cw > unitsPerLine) { push(); if (lines.length >= maxLines) { truncated = true; break; } }
+      cur += ch; w += cw;
+    }
+    if (truncated) break;
+  }
+  if (!truncated && cur) { if (lines.length < maxLines) lines.push(cur); else truncated = true; }
+  if (truncated && lines.length) {
+    let last = lines[lines.length - 1];
+    while (last && width(last) + 1 > unitsPerLine) last = [...last].slice(0, -1).join('');
+    lines[lines.length - 1] = last.replace(/[\s\/\-_]+$/, '') + '…';
+  }
+  return lines;
+}
+
+// 布局：从左到右的树。先算每个节点的真实高度，再自底向上排：每个节点的“子项”= 子课题 + 未开成课题的想法，
+// 子项在下一列依次往下排（间距 GAP），父节点在垂直方向上对齐子项整体的中心；子树之间不重叠。
+const NODE_W = 230, IDEA_W = 210, COL = 290, GAP = 14, TREE_GAP = 36;
+function nodeLines(p) { return wrapText(p.name, 25, 2); }
+function nodeHeight(p) { return 18 + nodeLines(p).length * 18 + 18 + 14; }   // 标题 + 元信息行 + 进度条
+function ideaLines(it) { return wrapText(it.t, 27, 3); }
+function ideaHeight(it) { return 12 + ideaLines(it).length * 16; }
+function layoutTree(roots) {
+  const nodes = [], links = [];
+  // 返回该子树占用的总高度；top 是这棵子树在画布上的起始 y
+  function place(id, depth, top) {
+    const p = P[id];
+    const hidden = treeState.collapsed.has(id);
+    const kids = hidden ? [] : p.children;
+    const ideas = treeState.showIdeas && !hidden ? p.ideas.filter(i => i.status !== '已开课题') : [];
+    const myH = nodeHeight(p);
+    const node = { id, x: depth * COL, y: 0, w: NODE_W, h: myH, depth, hiddenKids: hidden ? p.children.length : 0 };
+    nodes.push(node);
+    let cy = top, first = null, last = null;
+    kids.forEach((c, i) => {
+      if (i) cy += GAP;
+      const r = place(c, depth + 1, cy);
+      if (first === null) first = r.anchor; last = r.anchor;
+      links.push({ from: node, toId: c });
+      cy += r.height;
+    });
+    ideas.forEach((it, i) => {
+      if (kids.length || i) cy += GAP;
+      const ih = ideaHeight(it);
+      const idn = { idea: it, parent: id, x: (depth + 1) * COL, y: cy, w: IDEA_W, h: ih };
+      nodes.push(idn); links.push({ from: node, toIdea: idn });
+      const a = cy + ih / 2; if (first === null) first = a; last = a;
+      cy += ih;
+    });
+    const childSpan = cy - top;
+    let anchor;
+    if (first === null) { node.y = top; anchor = top + myH / 2; return { height: myH, anchor }; }
+    anchor = (first + last) / 2;
+    node.y = Math.max(top, anchor - myH / 2);
+    anchor = node.y + myH / 2;
+    return { height: Math.max(childSpan, node.y + myH - top), anchor };
+  }
+  let y = 0;
+  const ordered = roots.slice().sort((a, b) => (P[b].descendants - P[a].descendants) || (P[a].name < P[b].name ? -1 : 1));
+  ordered.forEach((r, i) => { if (i) y += TREE_GAP; y += place(r, 0, y).height; });
+  const byId = {}; nodes.forEach(n => { if (n.id) byId[n.id] = n; });
+  links.forEach(l => { l.to = l.toId ? byId[l.toId] : l.toIdea; });
+  const maxX = Math.max(0, ...nodes.map(n => n.x + n.w)), maxY = Math.max(0, ...nodes.map(n => n.y + n.h));
+  return { nodes, links, width: maxX + 40, height: maxY + 16 };
+}
+
+function drawTree(roots) {
+  const L = layoutTree(roots);
+  const svg = sv('svg', { class: 'mind', width: L.width, height: L.height, viewBox: '-10 -10 ' + (L.width + 10) + ' ' + (L.height + 10), role: 'img', 'aria-label': '问题树：从核心问题分出的子课题和想法' });
+  const gL = sv('g', { class: 'links' }), gN = sv('g', { class: 'nodes' });
+  L.links.forEach(l => {
+    const a = l.from, b = l.to;
+    const x1 = a.x + a.w + (a.id && (P[a.id].children.length || P[a.id].ideas.some(i => i.status !== '已开课题')) ? 20 : 0), y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2, mx = (x1 + x2) / 2;
+    gL.appendChild(sv('path', { d: 'M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2, class: b.idea ? 'ln ln-idea' : 'ln' }));
+  });
+  L.nodes.forEach(n => {
+    if (n.idea) {
+      const it = n.idea; const lines = ideaLines(it);
+      const g = sv('g', { class: 'idea ' + (IDEA_CLASS[it.status] || ''), transform: 'translate(' + n.x + ',' + n.y + ')' }, [
+        sv('rect', { width: n.w, height: n.h, rx: 6 }),
+        ...lines.map((t, i) => sv('text', { x: 10, y: 17 + i * 16, text: t })),
+        sv('title', { text: it.t + '\n状态：' + it.status + (it.why ? '\n理由：' + it.why : '') + (it.date ? '\n记录于 ' + it.date : '') })]);
+      gN.appendChild(g); return;
+    }
+    const p = P[n.id];
+    const w = warnsOf(p.id).length + DATA.audit.filter(a => a.level === 'warn' && (p.exps.includes(a.id) || p.hyps.includes(a.id))).length;
+    const title = nodeLines(p);
+    const meta = p.kind + ' · ' + p.status + (p.exps.length ? ' · 实验 ' + p.exps.length : '') + (p.hyps.length ? ' · 假设 ' + p.hyps.length : '');
+    const h = n.h;
+    const tot = p.stages.length || 1;
+    let bx = 10; const bars = [];
+    ['done', 'doing', 'blocked', 'unk', 'todo'].forEach(k => { const c = p.counts[k]; if (!c) return; const bw = (n.w - 20) * c / tot; bars.push(sv('rect', { class: 'b-' + k, x: bx, y: h - 8, width: Math.max(0, bw - 1), height: 4, rx: 1 })); bx += bw; });
+    const g = sv('g', { class: 'node ' + (KIND_CLASS[p.kind] || '') + (treeState.focus === p.id ? ' focus' : ''), transform: 'translate(' + n.x + ',' + n.y + ')', tabindex: '0', role: 'button', 'aria-label': p.kind + '：' + p.name + '。按回车打开详情', 'data-go': 'p:' + p.id }, [
+      sv('rect', { class: 'box', width: n.w, height: h, rx: 8 }),
+      sv('rect', { class: 'stripe', width: 5, height: h, rx: 2 }),
+      ...title.map((t, i) => sv('text', { class: 'tt', x: 14, y: 22 + i * 18, text: t })),
+      sv('text', { class: 'mt', x: 14, y: 18 + title.length * 18 + 4, text: meta }),
+      ...bars,
+      w ? sv('g', { class: 'wbadge', transform: 'translate(' + (n.w - 14) + ',-6)' }, [sv('circle', { r: 10 }), sv('text', { 'text-anchor': 'middle', y: 4, text: String(w) }), sv('title', { text: w + ' 条纪律警告' })]) : null,
+      sv('title', { text: p.name + '\n' + p.question + (p.origin ? '\n\n怎么分出来的：' + p.origin : '') })]);
+    if (p.children.length || p.ideas.some(i => i.status !== '已开课题')) {
+      const open = !treeState.collapsed.has(p.id);
+      const tg = sv('g', { class: 'toggle', transform: 'translate(' + (n.w + 2) + ',' + (n.h / 2 - 8) + ')', tabindex: '0', role: 'button', 'aria-label': (open ? '收起' : '展开') + '「' + p.name + '」的分支', onclick: ev => { ev.stopPropagation(); open ? treeState.collapsed.add(p.id) : treeState.collapsed.delete(p.id); saveTree(); go('tree', true); }, onkeydown: ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); ev.currentTarget.dispatchEvent(new MouseEvent('click', { bubbles: false })); } } }, [
+        sv('circle', { r: 9, cx: 9, cy: 8 }), sv('text', { x: 9, y: 12, 'text-anchor': 'middle', text: open ? '−' : (n.hiddenKids ? String(n.hiddenKids) : '+') })]);
+      g.appendChild(tg);
+    }
+    g.addEventListener('keydown', ev => { if (ev.target === g && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); go('p:' + p.id); } });
+    gN.appendChild(g);
+  });
+  svg.appendChild(gL); svg.appendChild(gN);
+  return svg;
+}
+
+// 无图版本：同一棵树的缩进列表，给窄屏、读屏器和打印用
+function treeList(ids) {
+  return h('ul', { class: 'tlist' }, ids.map(id => {
+    const p = P[id];
+    const ideas = p.ideas.filter(i => i.status !== '已开课题');
+    return h('li', null, [
+      h('div', { class: 'tl-row' }, [h('span', { class: 'kpill ' + (KIND_CLASS[p.kind] || ''), text: p.kind }), h('button', { class: 'linkbtn', type: 'button', 'data-go': 'p:' + p.id, text: p.name }), pill('p-' + p.status, p.status)]),
+      p.origin ? h('div', { class: 'tl-origin', text: '怎么分出来的：' + p.origin }) : null,
+      ideas.length ? h('ul', { class: 'tl-ideas' }, ideas.map(i => h('li', { class: IDEA_CLASS[i.status] || '' }, [h('span', { class: 'istat', text: i.status }), ' ' + i.t + (i.why ? '（' + i.why + '）' : '')]))) : null,
+      p.children.length ? treeList(p.children) : null]);
+  }));
+}
+
+function viewTree() {
+  const v = h('div', { class: 'view' });
+  const T = DATA.tree;
+  v.appendChild(h('div', null, [h('h1', { text: '问题树' }), h('p', { class: 'sub', text: '一个核心问题，在和 agent 的讨论中分出了哪些可以单独研究的子课题，又冒出了哪些还没决定做不做的想法。点节点打开课题详情；悬停看它是怎么分出来的。' })]));
+  const nIdeaOpen = T.n_ideas_open, nOrphan = DATA.audit.filter(a => a.code === 'orphan-subtopic').length;
+  v.appendChild(h('div', { class: 'sum' }, [
+    h('div', null, [h('span', { text: '核心问题' }), h('strong', { text: String(DATA.projects.filter(p => p.kind === '核心问题').length) })]),
+    h('div', null, [h('span', { text: '子课题与分支' }), h('strong', { text: String(DATA.projects.filter(p => p.kind !== '核心问题').length) })]),
+    h('div', null, [h('span', { text: '最深层数' }), h('strong', { text: String(T.max_depth + 1) })]),
+    h('div', { class: nIdeaOpen ? 'hot' : '' }, [h('span', { text: '待评估的想法' }), h('strong', { text: String(nIdeaOpen) })]),
+    h('div', { class: nOrphan ? 'hot' : '' }, [h('span', { text: '没挂到树上' }), h('strong', { text: String(nOrphan) })])]));
+  if (!DATA.projects.length) { v.appendChild(h('div', { class: 'empty', text: '还没有课题。先建一个 kind: 核心问题 的课题，讨论中分出来的子课题写 parent 指向它。' })); return v; }
+  const ctl = h('div', { class: 'filters' }, [
+    h('label', { class: 'chkl' }, [h('input', { type: 'checkbox', class: 'chk', checked: treeState.showIdeas, onchange: ev => { treeState.showIdeas = ev.target.checked; saveTree(); go('tree', true); } }), ' 显示还没开成课题的想法']),
+    h('button', { class: 'btn', type: 'button', onclick: () => { treeState.collapsed.clear(); saveTree(); go('tree', true); }, text: '全部展开' }),
+    h('button', { class: 'btn', type: 'button', onclick: () => { DATA.projects.forEach(p => { if (p.children.length && p.depth >= 1) treeState.collapsed.add(p.id); }); saveTree(); go('tree', true); }, text: '只看前两层' })]);
+  v.appendChild(ctl);
+  v.appendChild(h('div', { class: 'legend' }, [
+    h('span', null, [h('i', { class: 'lg k-root' }), '核心问题']), h('span', null, [h('i', { class: 'lg k-sub' }), '子课题']), h('span', null, [h('i', { class: 'lg k-idea' }), '想法分支']),
+    h('span', null, [h('i', { class: 'lg i-open' }), '想法：待评估']), h('span', null, [h('i', { class: 'lg i-park' }), '暂不做']), h('span', null, [h('i', { class: 'lg i-drop' }), '放弃']),
+    h('span', null, [h('i', { class: 'lg warnc' }), '数字 = 纪律警告'])]));
+  const wrap = h('div', { class: 'mindwrap panel' }, [drawTree(T.roots)]);
+  v.appendChild(wrap);
+  requestAnimationFrame(() => {
+    const big = T.roots.slice().sort((a, b) => P[b].descendants - P[a].descendants)[0];
+    const g = big && wrap.querySelector('svg.mind .node[data-go="p:' + big + '"]');
+    if (!g) return;
+    const wr = wrap.getBoundingClientRect(), gr = g.getBoundingClientRect();
+    wrap.scrollTop += (gr.top - wr.top) - Math.max(0, (wrap.clientHeight - gr.height) / 2);
+  });
+  v.appendChild(h('details', { class: 'panel' }, [h('summary', { text: '文字版（同一棵树，适合窄屏和读屏器）' }), treeList(T.roots)]));
+  const closed = DATA.projects.flatMap(p => p.ideas.filter(i => i.status === '已开课题').map(i => ({ p, i })));
+  if (closed.length) v.appendChild(h('div', { class: 'panel' }, [h('h2', { text: '已开成课题的想法' }), h('p', { class: 'sub', text: '这些想法已经变成树上的子课题，图里不再单独画出。' }),
+    h('ul', { class: 'plain' }, closed.map(({ p, i }) => h('li', null, [i.t + ' → ', P[i.to] ? h('button', { class: 'linkbtn', type: 'button', 'data-go': 'p:' + i.to, text: P[i.to].name }) : i.to, h('span', { class: 'sub', text: '（来自「' + p.name + '」' + (i.date ? '，' + i.date : '') + '）' })])))]));
   return v;
 }
 
@@ -279,11 +477,10 @@ function viewHow() {
 
 function renderNav() {
   const box = $('#navProjects'); box.textContent = '';
-  DATA.lines.forEach(L => {
-    const ps = DATA.projects.filter(p => p.line === L); if (!ps.length) return;
-    box.appendChild(h('h4', { text: L }));
-    ps.forEach(p => box.appendChild(h('button', { class: 'nv', type: 'button', 'data-go': 'p:' + p.id }, [h('span', { class: 'dot st-' + p.status }), p.name])));
-  });
+  // 侧栏也按问题树缩进：核心问题在最外层，子课题按层级缩进
+  box.appendChild(h('h4', { text: '问题树' }));
+  function add(id) { const p = P[id]; box.appendChild(h('button', { class: 'nv', type: 'button', 'data-go': 'p:' + p.id, style: 'padding-left:' + (8 + Math.min(p.depth, 4) * 14) + 'px' }, [h('span', { class: 'dot st-' + p.status }), p.short || p.name])); p.children.forEach(add); }
+  DATA.tree.roots.slice().sort((a, b) => (P[b].descendants - P[a].descendants) || (P[a].name < P[b].name ? -1 : 1)).forEach(add);
 }
 function setCurrent(route) { document.querySelectorAll('nav.side button.nv').forEach(b => b.setAttribute('aria-current', String(b.getAttribute('data-go') === route))); }
 function go(route, keep) {
@@ -294,20 +491,20 @@ function go(route, keep) {
   const main = $('#main'); main.textContent = '';
   let view;
   if (r === 'home') view = viewHome(); else if (r === 'exps') view = viewExps(); else if (r === 'hyps') view = viewHyps(); else if (r === 'errors') view = viewErrors();
-  else if (r === 'audit') view = viewAudit(); else if (r === 'how') view = viewHow();
-  else if (r.startsWith('p:') && P[r.slice(2)]) view = viewProject(r.slice(2)); else { r = 'home'; view = viewHome(); }
+  else if (r === 'audit') view = viewAudit(); else if (r === 'how') view = viewHow(); else if (r === 'tree') view = viewTree();
+  else if (r.startsWith('p:') && P[r.slice(2)]) view = viewProject(r.slice(2)); else { r = 'tree'; view = viewTree(); }
   main.appendChild(view);
   if (r === 'exps') renderExps();
   setCurrent(r);
-  const hash = r === 'home' ? '' : (r.startsWith('p:') ? 'p-' + r.slice(2) : r);
+  const hash = r === 'tree' ? '' : (r.startsWith('p:') ? 'p-' + r.slice(2) : r);
   if (!keep && location.hash.slice(1) !== hash) { try { history.replaceState(null, '', hash ? '#' + hash : location.pathname + location.search); } catch (e) {} }
   store.set('lastRoute', r);
   const t = scrollTo && document.getElementById(scrollTo);
   if (t) t.scrollIntoView(); else window.scrollTo(0, 0);
 }
-function fromHash() { const x = location.hash.slice(1); if (!x) return null; if (x.startsWith('p-')) return 'p:' + x.slice(2); return ['exps', 'hyps', 'errors', 'audit', 'how'].includes(x) ? x : null; }
+function fromHash() { const x = location.hash.slice(1); if (!x) return null; if (x.startsWith('p-')) return 'p:' + x.slice(2); return ['home', 'tree', 'exps', 'hyps', 'errors', 'audit', 'how'].includes(x) ? x : null; }
 document.addEventListener('click', ev => { const t = ev.target.closest('[data-go]'); if (t) { ev.preventDefault(); go(t.getAttribute('data-go')); } });
-window.addEventListener('hashchange', () => { const r = fromHash(); go(r || 'home', true); });
+window.addEventListener('hashchange', () => { const r = fromHash(); go(r || 'tree', true); });
 $('#today').textContent = '数据日期 ' + DATA.today;
 renderNav();
-go(fromHash() || 'home', true);
+go(fromHash() || 'tree', true);

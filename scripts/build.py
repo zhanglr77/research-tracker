@@ -43,7 +43,8 @@ def payload(data):
             url = path if web else (('file://' + q.replace(' ', '%20')) if exists else '')
             links.append({'label': l['label'], 'path': path, 'url': url, 'exists': bool(exists)})
         item = {k: p[k] for k in ('id', 'name', 'short', 'line', 'status', 'basis', 'updated', 'question', 'stages', 'facts', 'blockers', 'next', 'retracted',
-                                  'sources', 'related', 'deadline', 'counts', 'hyps', 'exps', 'age', 'body')}
+                                  'sources', 'related', 'deadline', 'counts', 'hyps', 'exps', 'age', 'body',
+                                  'kind', 'parent', 'origin', 'ideas', 'children', 'depth', 'root', 'descendants')}
         item['links'] = links
         projects.append(item)
     exps = []
@@ -54,7 +55,7 @@ def payload(data):
     return {
         'title': cfg['title'], 'today': data['today'].isoformat(), 'generated': dt.datetime.now().strftime('%Y-%m-%d %H:%M'), 'staleDays': cfg['stale_days'],
         'lines': cfg['lines'], 'statusOrder': T.STATUS, 'projects': projects, 'hyps': [{k: v for k, v in h.items() if k != 'body'} for h in data['hyps']], 'exps': exps,
-        'errors': data['errors'], 'audit': data['audit'], 'checksOff': cfg['checks_off'],
+        'errors': data['errors'], 'audit': data['audit'], 'checksOff': cfg['checks_off'], 'tree': data['tree'],
         'codes': {k: {'name': v[0], 'level': v[1], 'what': v[2]} for k, v in T.CODES.items()}, 'names': {},
     }
 
@@ -63,7 +64,7 @@ def render(data):
     page = '<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n'
     page += '<title>%s</title>\n<style>\n%s\n</style>\n</head>\n<body>\n' % (_esc(data['cfg']['title']), read_asset('css/tracker.css'))
     page += ('<div class="shell">\n  <nav class="side" aria-label="导航">\n    <div class="brand">%s<small id="today"></small></div>\n'
-             '    <div><h4>总览</h4><button class="nv" type="button" data-go="home">全部课题</button>'
+             '    <div><h4>总览</h4><button class="nv" type="button" data-go="tree">问题树</button><button class="nv" type="button" data-go="home">全部课题</button>'
              '<button class="nv" type="button" data-go="hyps">假设台账</button><button class="nv" type="button" data-go="exps">实验记录</button>'
              '<button class="nv" type="button" data-go="errors">错误登记</button><button class="nv" type="button" data-go="audit">纪律检查</button>'
              '<button class="nv" type="button" data-go="how">怎么更新</button></div>\n    <div class="grp" id="navProjects"></div>\n  </nav>\n  <main id="main"></main>\n</div>\n') % _esc(data['cfg']['title'])
